@@ -1,10 +1,10 @@
 (defsystem "revision-backend-jj"
-  :version "0.1.0"
+  :version "0.2.0"
   :description "revision-protocol backend over the jj (Jujutsu) CLI: changes as revisions (change ids, commit id in provenance), bookmarks and tags as refs with CAS emulated through the operation log, recorded-time as-of via --at-op, graph walks via revsets, state diffs via jj diff --git and diff-protocol, working-copy drift and capture of @, a read-only cl-stack-pathlib filesystem per revision"
   :author "egao1980"
   :license "MIT"
-  :depends-on ((:version "revision-protocol" "0.2.0")
-               (:version "diff-protocol" "0.2.0")
+  :depends-on ((:version "revision-protocol" "0.3.0")
+               (:version "diff-protocol" "0.2.1")
                (:version "datetime-protocol" "0.1.3")
                (:version "process-protocol" "0.3.0")
                (:version "process-backend-uiop" "0.2.0")

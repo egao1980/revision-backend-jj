@@ -154,19 +154,50 @@ every tree jj checks out equals the tree on disk."
                                   (%state store stamp) (%state store cid))
           (%state-diff store stamp cid :changes nil))))))
 
+(defun %capture-metaedit (store change valid-at provenance)
+  "Give the captured CHANGE COMMIT-REVISION's author time (VALID-AT) and the
+identities in PROVENANCE: `jj metaedit`, which rewrites it in place (same change
+id) with the committer from --config user.name / user.email. @ is its
+descendant, so the working copy is updated (its files do not change)."
+  (when (or valid-at provenance)
+    (let ((author-name (getf provenance :author-name))
+          (author-email (getf provenance :author-email))
+          (committer-name (getf provenance :committer-name))
+          (committer-email (getf provenance :committer-email)))
+      (run-jj store
+              (append (list "metaedit" "-r" change)
+                      (when valid-at
+                        (list "--author-timestamp" (%rfc3339 valid-at)))
+                      (when (or author-name author-email)
+                        (let ((now (rev:revision-provenance (rev:resolve-revision store change))))
+                          (list "--author"
+                                (format nil "~a <~a>"
+                                        (or author-name (getf now :author-name))
+                                        (or author-email (getf now :author-email))))))
+                      (when committer-name
+                        (list "--config" (format nil "user.name=~a" committer-name)))
+                      (when committer-email
+                        (list "--config" (format nil "user.email=~a" committer-email))))
+              :ignore-working-copy nil))))
+
 (defmethod rev:capture-revision ((target jj-working-copy) store
-                                 &key (parents nil parents-p) message)
+                                 &key (parents nil parents-p) message provenance
+                                   valid-at id)
   (declare (ignore store))
+  (when id
+    (error 'rev:revision-error :message "jj chooses revision ids; :ID is not accepted"))
+  (check-type valid-at (or null dt:instant))
   (let ((store (working-copy-store target))
         (message (or message "capture")))
     (%snapshot store)
-    (if parents-p
-        (let* ((cids (mapcar (lambda (d) (%resolve-cid store d)) parents))
-               (new (%replace-at store cids message :new)))
-          (rev:resolve-revision store new))
-        (let ((change (getf (%at store) :change-id)))
-          (run-jj store (list "commit" "-m" message) :ignore-working-copy nil)
-          (rev:resolve-revision store change)))))
+    (let ((change (if parents-p
+                      (let ((cids (mapcar (lambda (d) (%resolve-cid store d)) parents)))
+                        (%replace-at store cids message :new))
+                      (let ((change (getf (%at store) :change-id)))
+                        (run-jj store (list "commit" "-m" message) :ignore-working-copy nil)
+                        change))))
+      (%capture-metaedit store change valid-at provenance)
+      (rev:resolve-revision store change))))
 
 (defmethod rev:target-fidelities ((target jj-working-copy))
   nil)

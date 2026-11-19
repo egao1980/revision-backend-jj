@@ -183,3 +183,53 @@
       (ok (null (rev:revision-parent-ids rv)))
       (ok (equal (lines "a") (diff:tree-file-content (file-at (rev:revision-state s rv) "a.txt"))))
       (ok (null (rev:target-drift w s))))))
+
+(deftest capture-caller-keys
+  ;; revision-protocol 0.3.0: :VALID-AT and :PROVENANCE as in COMMIT-REVISION
+  ;; (author time, identities); :ID is refused before anything changes.
+  (testing "default parents"
+    (with-test-repo (r)
+      (let* ((k (build-working-copy r))
+             (s (open-store r))
+             (w (jj:make-jj-working-copy s))
+             (old-wc (change-of r "@")))
+        (declare (ignore k))
+        (dirty r)
+        (let ((rv (with-untouched-files (r)
+                    (rev:capture-revision w s :valid-at (instant (+ +t0+ 42))
+                                              :provenance '(:author-name "Ada" :author-email "ada@example.invalid"
+                                                            :committer-name "Bob"
+                                                            :committer-email "bob@example.invalid")))))
+          (ok (equal old-wc (rev:revision-id rv)) "still the old @ change")
+          (ok (= (+ +t0+ 42) (unix (rev:revision-valid-at rv))) "author time = valid-at")
+          (ok (equal (list "Ada ada@example.invalid Bob bob@example.invalid")
+                     (jj-log r (rev:revision-id rv)
+                             "author.name() ++ \" \" ++ author.email() ++ \" \" ++ committer.name() ++ \" \" ++ committer.email()")))
+          (ok (equal (list (rev:revision-id rv)) (rev:target-revisions w)))
+          (ok (null (rev:target-drift w s)) "no drift afterwards")))))
+  (testing "other parents"
+    (with-test-repo (r)
+      (let* ((k (build-linear r))
+             (s (open-store r))
+             (w (jj:make-jj-working-copy s)))
+        (put-file r "a.txt" (lines "captured"))
+        (let ((rv (with-untouched-files (r)
+                    (rev:capture-revision w s :parents (list (getf k :c1)) :message "on c1"
+                                              :valid-at (instant (+ +t0+ 7))
+                                              :provenance '(:author-name "Ada")))))
+          (ok (= (+ +t0+ 7) (unix (rev:revision-valid-at rv))))
+          (ok (equal "Ada" (getf (rev:revision-provenance rv) :author-name)))
+          (ok (equal "on c1" (rev:revision-message rv)))
+          (ok (equal (list (rev:revision-id rv)) (rev:target-revisions w)))
+          (ok (null (rev:target-drift w s)))))))
+  (testing ":id is refused, nothing changes"
+    (with-test-repo (r)
+      (build-working-copy r)
+      (let* ((s (open-store r))
+             (w (jj:make-jj-working-copy s)))
+        (dirty r)
+        (let ((at (change-of r "@"))
+              (heads (sort (jj-log r "heads(all())" "change_id") #'string<)))
+          (ok (signals (rev:capture-revision w s :id "chosen") 'rev:revision-error))
+          (ok (equal at (change-of r "@")) "@ unchanged")
+          (ok (equal heads (sort (jj-log r "heads(all())" "change_id") #'string<)) "no new change"))))))
