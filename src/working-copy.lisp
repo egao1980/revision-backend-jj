@@ -61,41 +61,115 @@ state, drift and capture rules."))
 
 (defun make-jj-working-copy (store)
   "→ JJ-WORKING-COPY over STORE's workspace. Runs no jj command."
-  (declare (ignore store))
-  (%not-implemented 'make-jj-working-copy))
+  (check-type store jj-store)
+  (make-instance 'jj-working-copy :store store))
 
 (defun working-copy-path (working-copy)
   "→ absolute directory pathname of WORKING-COPY's workspace root (its
 store's JJ-STORE-PATH)."
-  (declare (ignore working-copy))
-  (%not-implemented 'working-copy-path))
+  (jj-store-path (working-copy-store working-copy)))
+
+(defun %snapshot (store)
+  "Record the workspace's files into @ (jj's snapshot rules)."
+  (run-jj store (list "util" "snapshot") :ignore-working-copy nil))
+
+(defun %at (store)
+  "Commit record of @ (no snapshot)."
+  (or (first (%log store "@"))
+      (error 'rev:revision-error :message "the workspace has no working-copy commit")))
 
 (defun working-copy-revision (working-copy)
   "Snapshot, then → the REVISION of @, the working-copy commit."
-  (declare (ignore working-copy))
-  (%not-implemented 'working-copy-revision))
+  (let ((store (working-copy-store working-copy)))
+    (%snapshot store)
+    (%revision (%at store))))
 
 (defmethod rev:target-revisions ((target jj-working-copy))
-  (%not-implemented 'rev:target-revisions))
+  (%record-parent-ids (%at (working-copy-store target))))
+
+(defun %heads (store)
+  (mapcar (lambda (r) (getf r :commit-id)) (%log store "heads(all())")))
+
+(defun %new-change (store parent-cids message)
+  "`jj new --no-edit -m MESSAGE P…` → the change id of the new commit."
+  (let ((before (%heads store)))
+    (run-jj store (append (list "new" "--no-edit" "-m" message)
+                          (if parent-cids
+                              (mapcar #'%cid-arg parent-cids)
+                              (list "root()"))))
+    (let* ((new (set-difference (%heads store) before :test #'string=))
+           (record (and (= 1 (length new)) (%commit-record store (first new) (first new)))))
+      (unless record
+        (error 'rev:revision-error :message "cannot find the change jj new created"))
+      (getf record :change-id))))
+
+(defun %replace-at (store parent-cids message then)
+  "Replace @ by a new change on PARENT-CIDS with @'s tree and MESSAGE; THEN
+is :EDIT (the new change becomes @) or :NEW (@ becomes an empty child of
+it). The old @ is abandoned. → the new change id. Writes no workspace file:
+every tree jj checks out equals the tree on disk."
+  (%snapshot store)
+  (let* ((old (%at store))
+         (old-cid (getf old :commit-id))
+         (new (%new-change store parent-cids message)))
+    (run-jj store (list "restore" "--from" old-cid "--into" new))
+    (ecase then
+      (:edit (run-jj store (list "edit" new) :ignore-working-copy nil))
+      (:new (run-jj store (list "new" new) :ignore-working-copy nil)))
+    (let ((old-now (first (%try-log store old-cid))))
+      (when (and old-now (not (getf old-now :hidden)))
+        (run-jj store (list "abandon" old-cid))))
+    new))
 
 (defmethod rev:target-stamp ((target jj-working-copy) revisions)
-  (declare (ignore revisions))
-  (%not-implemented 'rev:target-stamp))
+  (let* ((store (working-copy-store target))
+         (records (mapcar (lambda (d) (%resolve-record store d)) revisions))
+         (unique '()))
+    (dolist (r records)
+      (unless (find (%rid r) unique :key #'%rid :test #'string=)
+        (push r unique)))
+    (setf unique (nreverse unique))
+    (%snapshot store)
+    (%replace-at store (mapcar (lambda (r) (getf r :commit-id)) unique)
+                 (getf (%at store) :description) :edit)
+    (rev:target-revisions target)))
 
 (defmethod rev:target-state ((target jj-working-copy))
-  (%not-implemented 'rev:target-state))
+  (let ((store (working-copy-store target)))
+    (%snapshot store)
+    (%state store (getf (%at store) :commit-id))))
 
 (defmethod rev:target-drift ((target jj-working-copy) store)
   (declare (ignore store))
-  (%not-implemented 'rev:target-drift))
+  (let ((store (working-copy-store target)))
+    (%snapshot store)
+    (let* ((at (%at store))
+           (parents (remove +root-commit-id+ (getf at :parents) :test #'string=)))
+      (when (rest parents)
+        (error 'rev:revision-error
+               :message "the working copy is stamped with several revisions"))
+      (let ((stamp (or (first parents) +root-commit-id+))
+            (cid (getf at :commit-id)))
+        (unless (diff:state-equal (rev:content-engine store)
+                                  (%state store stamp) (%state store cid))
+          (%state-diff store stamp cid :changes nil))))))
 
 (defmethod rev:capture-revision ((target jj-working-copy) store
                                  &key (parents nil parents-p) message)
-  (declare (ignore store parents parents-p message))
-  (%not-implemented 'rev:capture-revision))
+  (declare (ignore store))
+  (let ((store (working-copy-store target))
+        (message (or message "capture")))
+    (%snapshot store)
+    (if parents-p
+        (let* ((cids (mapcar (lambda (d) (%resolve-cid store d)) parents))
+               (new (%replace-at store cids message :new)))
+          (rev:resolve-revision store new))
+        (let ((change (getf (%at store) :change-id)))
+          (run-jj store (list "commit" "-m" message) :ignore-working-copy nil)
+          (rev:resolve-revision store change)))))
 
 (defmethod rev:target-fidelities ((target jj-working-copy))
-  (%not-implemented 'rev:target-fidelities))
+  nil)
 
 (defmethod rev:target-transactional-p ((target jj-working-copy))
-  (%not-implemented 'rev:target-transactional-p))
+  nil)

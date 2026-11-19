@@ -87,6 +87,117 @@ PARSE-FILE-RECORDS.")
   "Template (a `TreeDiffEntry` template) for `jj diff --from A --to B -T`:
 one JSON object per changed file. Parsed by PARSE-DIFF-RECORDS.")
 
+;;; ------------------------------------------------------------------
+;;; The line engine shared by the five parsers. Every failure is a
+;;; REVISION-ERROR naming the line; the JSON layer's own condition
+;;; (JSON-PROTOCOL:JSON-ERROR) is the only foreign one translated.
+;;; ------------------------------------------------------------------
+
+(defun %parse-fail (line control &rest args)
+  (error 'rev:revision-error
+         :message (format nil "jj output line ~d: ~?" line control args)))
+
+(defun %blank-line-p (line)
+  (every (lambda (c) (member c '(#\Space #\Tab #\Return))) line))
+
+(defun %output-lines (input)
+  "→ list of (line-number . text) of INPUT's non-blank lines; a CR right before
+the LF is dropped."
+  (unless (stringp input)
+    (%parse-fail 0 "input is not a string: ~s" (type-of input)))
+  (let ((n (length input))
+        (start 0)
+        (number 0)
+        (out '()))
+    (loop while (< start n)
+          do (let* ((end (or (position #\Newline input :start start) n))
+                    (stop (if (and (> end start) (char= #\Return (char input (1- end))))
+                              (1- end)
+                              end))
+                    (text (subseq input start stop)))
+               (incf number)
+               (unless (%blank-line-p text)
+                 (push (cons number text) out))
+               (setf start (1+ end))))
+    (nreverse out)))
+
+(defun %decode-object (number text)
+  (let ((value (handler-case (json:decode text)
+                 (json:json-error (e)
+                   (%parse-fail number "not JSON (~a)" (json:json-error-message e))))))
+    (unless (hash-table-p value)
+      (%parse-fail number "not a JSON object"))
+    value))
+
+(defun %parse-lines (input fn)
+  "FN (object line-number) → plist, for each non-blank line of INPUT."
+  (loop for (number . text) in (%output-lines input)
+        collect (funcall fn (%decode-object number text) number)))
+
+(defun %field (object key line)
+  (multiple-value-bind (value found) (gethash key object)
+    (unless found (%parse-fail line "missing key ~s" key))
+    value))
+
+(defun %string-field (object key line)
+  (let ((v (%field object key line)))
+    (unless (stringp v) (%parse-fail line "~s is not a string" key))
+    v))
+
+(defun %bool-field (object key line)
+  (let ((v (%field object key line)))
+    (unless (member v '(t nil)) (%parse-fail line "~s is not a boolean" key))
+    v))
+
+(defun %integer-field (object key line)
+  (let ((v (%field object key line)))
+    (unless (integerp v) (%parse-fail line "~s is not an integer" key))
+    v))
+
+(defun %object-field (object key line)
+  (let ((v (%field object key line)))
+    (unless (hash-table-p v) (%parse-fail line "~s is not an object" key))
+    v))
+
+(defun %list-field (object key line predicate what)
+  (let ((v (%field object key line)))
+    (unless (and (vectorp v) (not (stringp v)) (every predicate v))
+      (%parse-fail line "~s is not an array of ~a" key what))
+    (coerce v 'list)))
+
+(defun %strings-field (object key line)
+  (%list-field object key line #'stringp "strings"))
+
+(defun %bools-field (object key line)
+  (%list-field object key line (lambda (x) (member x '(t nil))) "booleans"))
+
+(defun %digits-field (object key line)
+  "A string of decimal digits (leading zeros allowed) → integer."
+  (let ((v (%string-field object key line)))
+    (unless (and (plusp (length v)) (every (lambda (c) (char<= #\0 c #\9)) v))
+      (%parse-fail line "~s is not a string of digits: ~s" key v))
+    (parse-integer v)))
+
+(defun %enum-field (object key line table &key empty-nil)
+  (let ((v (%string-field object key line)))
+    (cond ((and empty-nil (string= v "")) nil)
+          ((cdr (assoc v table :test #'string=)))
+          (t (%parse-fail line "~s has an unknown value ~s" key v)))))
+
+(defparameter +file-types+
+  '(("file" . :file) ("symlink" . :symlink) ("tree" . :tree)
+    ("git-submodule" . :git-submodule) ("conflict" . :conflict)))
+
+(defparameter +diff-statuses+
+  '(("modified" . :modified) ("added" . :added) ("removed" . :removed)
+    ("copied" . :copied) ("renamed" . :renamed)))
+
+(defun %signature (object key line)
+  (let ((sig (%object-field object key line)))
+    (values (%string-field sig "name" line)
+            (%string-field sig "email" line)
+            (%integer-field sig "time" line))))
+
 (defun parse-commit-records (input)
   "Parse *COMMIT-TEMPLATE* output INPUT (a string). → list of plists:
 
@@ -100,8 +211,29 @@ one JSON object per changed file. Parsed by PARSE-DIFF-RECORDS.")
 times are integer unix seconds; PARENTS, PARENT-CHANGE-IDS and
 PARENT-DIVERGENT are parallel lists in commit order (the root commit has
 none; a root change's parent is the root commit, id 40 zeros)."
-  (declare (ignore input))
-  (%not-implemented 'parse-commit-records))
+  (%parse-lines
+   input
+   (lambda (o n)
+     (multiple-value-bind (author-name author-email author-time) (%signature o "author" n)
+       (multiple-value-bind (committer-name committer-email committer-time)
+           (%signature o "committer" n)
+         (list :change-id (%string-field o "change_id" n)
+               :commit-id (%string-field o "commit_id" n)
+               :parents (%strings-field o "parents" n)
+               :parent-change-ids (%strings-field o "parent_change_ids" n)
+               :parent-divergent (%bools-field o "parent_divergent" n)
+               :description (%string-field o "description" n)
+               :author-name author-name :author-email author-email
+               :author-time author-time
+               :committer-name committer-name :committer-email committer-email
+               :committer-time committer-time
+               :conflict (%bool-field o "conflict" n)
+               :divergent (%bool-field o "divergent" n)
+               :immutable (%bool-field o "immutable" n)
+               :empty (%bool-field o "empty" n)
+               :hidden (%bool-field o "hidden" n)
+               :root (%bool-field o "root" n)
+               :working-copy (%bool-field o "working_copy" n)))))))
 
 (defun parse-operation-records (input)
   "Parse *OPERATION-TEMPLATE* output INPUT (a string). → list of plists:
@@ -111,8 +243,16 @@ none; a root change's parent is the root commit, id 40 zeros)."
 
 START-MS / END-MS are integers: the time strings read as decimal digits
 (leading zeros allowed; anything else → REVISION-ERROR)."
-  (declare (ignore input))
-  (%not-implemented 'parse-operation-records))
+  (%parse-lines
+   input
+   (lambda (o n)
+     (list :id (%string-field o "id" n)
+           :parents (%strings-field o "parents" n)
+           :start-ms (%digits-field o "start_ms" n)
+           :end-ms (%digits-field o "end_ms" n)
+           :description (%string-field o "description" n)
+           :snapshot (%bool-field o "snapshot" n)
+           :root (%bool-field o "root" n)))))
 
 (defun parse-ref-records (input)
   "Parse *REF-TEMPLATE* output INPUT (a string). → list of plists:
@@ -121,8 +261,13 @@ START-MS / END-MS are integers: the time strings read as decimal digits
 
 TARGETS has one element for a normal ref and two or more for a conflicted
 bookmark; TARGET-CHANGE-IDS is parallel to it."
-  (declare (ignore input))
-  (%not-implemented 'parse-ref-records))
+  (%parse-lines
+   input
+   (lambda (o n)
+     (list :name (%string-field o "name" n)
+           :conflict (%bool-field o "conflict" n)
+           :targets (%strings-field o "targets" n)
+           :target-change-ids (%strings-field o "target_change_ids" n)))))
 
 (defun parse-file-records (input)
   "Parse *FILE-TEMPLATE* output INPUT (a string). → list of plists:
@@ -132,8 +277,14 @@ bookmark; TARGET-CHANGE-IDS is parallel to it."
 TYPE is one of :FILE :SYMLINK :TREE :GIT-SUBMODULE :CONFLICT (jj's
 file_type strings as keywords); any other string → REVISION-ERROR. SIDES is
 the integer conflict_side_count (1 when not conflicted)."
-  (declare (ignore input))
-  (%not-implemented 'parse-file-records))
+  (%parse-lines
+   input
+   (lambda (o n)
+     (list :path (%string-field o "path" n)
+           :type (%enum-field o "type" n +file-types+)
+           :executable (%bool-field o "executable" n)
+           :conflict (%bool-field o "conflict" n)
+           :sides (%integer-field o "sides" n)))))
 
 (defun parse-diff-records (input)
   "Parse *DIFF-TEMPLATE* output INPUT (a string). → list of plists:
@@ -146,5 +297,13 @@ string → REVISION-ERROR. SOURCE is the source path (equal to PATH unless
 copied / renamed). SOURCE-TYPE / TARGET-TYPE are keywords as in
 PARSE-FILE-RECORDS, or NIL for jj's \"\" (the side is absent: an added file
 has no source type, a removed one no target type)."
-  (declare (ignore input))
-  (%not-implemented 'parse-diff-records))
+  (%parse-lines
+   input
+   (lambda (o n)
+     (list :status (%enum-field o "status" n +diff-statuses+)
+           :source (%string-field o "source" n)
+           :path (%string-field o "path" n)
+           :source-type (%enum-field o "source_type" n +file-types+ :empty-nil t)
+           :target-type (%enum-field o "target_type" n +file-types+ :empty-nil t)
+           :source-executable (%bool-field o "source_executable" n)
+           :target-executable (%bool-field o "target_executable" n)))))
