@@ -1,0 +1,99 @@
+# Test on ubuntu / macos / windows with the pinned jj release.
+#
+# Same jobs as egao1980/cl-repository test-system.yml (ci-base container on
+# Ubuntu, setup-lisp + ci install / test), plus one step that installs the
+# official jj release binary (jj-vcs/jj) at JJ_VERSION, checked against the
+# SHA-256 below, and puts it first on PATH. The reusable workflow has no hook
+# for extra tools, so the jobs are spelled out here.
+#
+# Bumping jj: change JJ_VERSION and the checksums (shasum -a 256 of each
+# release asset) together with *minimum-jj-version* in src/jj.lisp; the CI run
+# of that PR is the evidence the CLI surface still holds.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  JJ_VERSION: "0.47.1"
+  SBCL_VERSION: "2.6.7"
+  ROSWELL_VERSION: "26.02.116"
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    container: ${{ startsWith(matrix.os, 'ubuntu') && 'ghcr.io/egao1980/cl-repository/ci-base:latest' || fromJSON('null') }}
+    defaults:
+      run:
+        shell: bash
+    permissions:
+      contents: read
+      packages: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install jj ${{ env.JJ_VERSION }}
+        run: |
+          set -euo pipefail
+          case "${RUNNER_OS}-${RUNNER_ARCH}" in
+            Linux-X64)     asset=x86_64-unknown-linux-musl.tar.gz; sum=d4b657f622ee50929c8916466dfa3d6a6c17a0a32b50e7b2c793707ec9ebcad7 ;;
+            Linux-ARM64)   asset=aarch64-unknown-linux-musl.tar.gz; sum=0f300e1576de8dabe0a9dedf0b87ae44f8accea5cf54d9a342a51061c1fb1bcd ;;
+            macOS-ARM64)   asset=aarch64-apple-darwin.tar.gz;       sum=50129b527f7cd6aef82aebd4bb2b670bb56766adc509ef3279c4327aa3592255 ;;
+            macOS-X64)     asset=x86_64-apple-darwin.tar.gz;        sum=ce7ac70c3b7cf90f2273b4fa62d24576727c5fd55c60dc3820221c05320c7589 ;;
+            Windows-X64)   asset=x86_64-pc-windows-msvc.zip;        sum=72f9f80bc99d07a7f48d5f219cf5bab91f7e906e4b53f6c827948e646cd1152f ;;
+            Windows-ARM64) asset=aarch64-pc-windows-msvc.zip;       sum=07f3cf6ed6db95f12be6c79c76aff948689375a9f201f521df4468d0a0c5de85 ;;
+            *) echo "no jj release asset for ${RUNNER_OS}-${RUNNER_ARCH}" >&2; exit 1 ;;
+          esac
+          dest="${RUNNER_TEMP}/jj-${JJ_VERSION}"
+          mkdir -p "$dest"
+          file="${RUNNER_TEMP}/jj-${asset}"
+          curl -fsSL --retry 3 -o "$file" \
+            "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-${asset}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            echo "${sum}  ${file}" | sha256sum -c -
+          else
+            echo "${sum}  ${file}" | shasum -a 256 -c -
+          fi
+          case "$asset" in
+            *.zip) pwsh -NoProfile -Command "Expand-Archive -Force -Path '${file}' -DestinationPath '${dest}'" ;;
+            *)     tar -xzf "$file" -C "$dest" ./jj ;;
+          esac
+          echo "$dest" >> "$GITHUB_PATH"
+          "$dest/jj" --version
+          {
+            echo "### jj on ${{ matrix.os }}"
+            echo '```'
+            "$dest/jj" --version
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: jj on PATH
+        run: |
+          type -a jj
+          jj --version
+
+      - uses: egao1980/cl-repository/.github/actions/setup-lisp@main
+        with:
+          version: latest
+          sbcl-version: ${{ env.SBCL_VERSION }}
+          roswell-version: ${{ env.ROSWELL_VERSION }}
+
+      - uses: egao1980/cl-repository/.github/actions/ci@main
+        with:
+          phase: install
+          sbcl-dynamic-space-mb: 4096
+
+      - uses: egao1980/cl-repository/.github/actions/ci@main
+        with:
+          phase: test
+          sbcl-dynamic-space-mb: 4096
