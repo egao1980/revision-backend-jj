@@ -1,0 +1,200 @@
+(in-package #:revision-backend-jj/tests)
+
+;;; COMMIT-REVISION: content forms, parents and refs, identity and times,
+;;; refusals and atomicity, and that the store's own working copy is never
+;;; touched. Results are read back with the real jj.
+
+(defun jj-file (repo change path)
+  "Real jj: exact bytes of PATH at CHANGE."
+  (jj* repo (list "file" "show" "-r" change (format nil "root-file:~s" path))
+       :ignore-working-copy t :output :octets))
+
+(defun jj-paths (repo change)
+  (jj-lines repo "file" "list" "-r" change "-T" "path ++ \"\\n\""))
+
+(defun jj-file-entry (repo change path)
+  "Real jj: (type executable-string) of PATH at CHANGE, or NIL."
+  (loop for line in (jj-lines repo "file" "list" "-r" change
+                              "-T" "path ++ \"\\t\" ++ file_type ++ \"\\t\" ++ executable ++ \"\\n\"")
+        for parts = (uiop:split-string line :separator '(#\Tab))
+        when (equal path (first parts)) return (rest parts)))
+
+(defun jj-executable-p (repo change path)
+  (equal "true" (second (jj-file-entry repo change path))))
+
+(defmacro with-untouched-workspace ((repo) &body body)
+  "BODY, then check REPO's @ commit, files and mtimes did not change."
+  (let ((wc (gensym)) (files (gensym)))
+    `(let ((,wc (commit-of ,repo "@"))
+           (,files (snapshot-of-workspace ,repo)))
+       (multiple-value-prog1 (progn ,@body)
+         (ok (equal ,wc (commit-of ,repo "@")) "@ not rewritten")
+         (ok (equalp ,files (snapshot-of-workspace ,repo)) "workspace files byte-identical")))))
+
+(deftest commit-a-tree-value
+  (with-test-repo (r)
+    (let* ((k (build-linear r))
+           (s (open-store r))
+           (tree (diff:make-tree
+                  "README" (diff:make-tree-file (lines "hi"))
+                  "bin" (diff:make-tree "x.bin" (diff:make-tree-file +bin-v1+))
+                  "crlf.txt" (diff:make-tree-file +crlf-v1+)
+                  "empty" (diff:make-tree-file "")
+                  "run.sh" (diff:make-tree-file (lines "echo") :mode #o100755)))
+           (rv (with-untouched-workspace (r)
+                 (rev:commit-revision s tree :parents (list (getf k :c2)) :message "values"))))
+      (ok (rev:revision-p rv))
+      (ok (equal (change-of r (rev:revision-id rv)) (rev:revision-id rv)) "a visible jj change")
+      (ok (equal (list (getf k :c2)) (rev:revision-parent-ids rv)))
+      (ok (equal (list (getf k :c2)) (changes-of r (format nil "~a-" (rev:revision-id rv)))))
+      (ok (equal '("README" "bin/x.bin" "crlf.txt" "empty" "run.sh")
+                 (jj-paths r (rev:revision-id rv)))
+          "exactly the tree: nothing of the parent's files remains")
+      (ok (equalp +bin-v1+ (jj-file r (rev:revision-id rv) "bin/x.bin")))
+      (ok (equalp (utf8 +crlf-v1+) (jj-file r (rev:revision-id rv) "crlf.txt")) "CRLF kept")
+      (ok (equalp (octets) (jj-file r (rev:revision-id rv) "empty")))
+      (ok (jj-executable-p r (rev:revision-id rv) "run.sh"))
+      (ok (not (jj-executable-p r (rev:revision-id rv) "README")))
+      (ok (equal (lines "values") (jj* r (list "log" "--no-graph" "-r" (rev:revision-id rv)
+                                               "-T" "description")
+                                       :ignore-working-copy t))
+          "one final newline added")
+      (ok (equal "values" (rev:revision-message rv)))
+      (ok (state= tree (rev:revision-state s rv)))
+      (ok (null (jj-lines r "workspace" "list" "-T" "if(name != \"default\", name ++ \"\\n\")"))
+          "the temporary workspace is forgotten"))))
+
+(deftest commit-a-symlink
+  (when (windows-p) (skip "symlinks need a POSIX filesystem"))
+  (unless (windows-p)
+    (with-test-repo (r)
+      (let* ((s (open-store r))
+             (rv (rev:commit-revision s (diff:make-tree
+                                         "target.txt" (diff:make-tree-file (lines "t"))
+                                         "link" (diff:make-tree-file "target.txt" :mode #o120000))
+                                      :message "link")))
+        (ok (equal "symlink" (first (jj-file-entry r (rev:revision-id rv) "link"))))
+        (ok (state= (diff:make-tree "target.txt" (diff:make-tree-file (lines "t"))
+                                    "link" (diff:make-tree-file "target.txt" :mode #o120000))
+                    (rev:revision-state s rv)))))))
+
+(deftest commit-parents-and-refs
+  (with-test-repo (r)
+    (let* ((k (build-merge r))
+           (s (open-store r)))
+      (testing "root when no parents and no ref"
+        (let ((rv (rev:commit-revision s (diff:make-tree) :message "root")))
+          (ok (null (rev:revision-parent-ids rv)))
+          (ok (equal (list "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")
+                     (changes-of r (format nil "~a-" (rev:revision-id rv))))
+              "a child of jj's root commit")
+          (ok (member (rev:revision-id rv) (changes-of r "heads(all())") :test #'equal)
+              "visible as a head without any ref")))
+      (testing "default parent = the ref's target; the ref moves"
+        (let ((rv (rev:commit-revision s (diff:make-tree "n" (diff:make-tree-file "n")) :ref "main")))
+          (ok (equal (list (getf k :x)) (rev:revision-parent-ids rv)))
+          (ok (equal (list (rev:revision-id rv)) (bookmark-target r "main")))))
+      (testing "a merge, parents in order"
+        (let ((rv (rev:commit-revision s (getf k :x) :parents (list (getf k :f2) (getf k :m1))
+                                          :ref "merged" :expected nil)))
+          (ok (equal (list (getf k :f2) (getf k :m1)) (rev:revision-parent-ids rv)))
+          (ok (equal (list (rev:revision-id rv)) (bookmark-target r "merged")))
+          (ok (state= (rev:revision-state s (getf k :x)) (rev:revision-state s rv))
+              "a string designator: that revision's state")))
+      (testing "parents given as designators"
+        (let ((rv (rev:commit-revision s (diff:make-tree) :parents (list (rev:rev-ref "feature")))))
+          (ok (equal (list (getf k :f2)) (rev:revision-parent-ids rv))))))))
+
+(deftest commit-diffs-and-payloads
+  (with-test-repo (r)
+    (let* ((k (build-linear r))
+           (s (open-store r))
+           (delta (rev:revision-delta s (getf k :c2))))
+      (let ((rv (rev:commit-revision s delta :parents (list (getf k :c1)) :message "replayed")))
+        (ok (state= (rev:revision-state s (getf k :c2)) (rev:revision-state s rv))
+            "a diff applies to the first parent's state"))
+      (let ((rv (rev:commit-revision s (rev:make-payload :state (diff:make-tree "p" (diff:make-tree-file "p")))
+                                     :message "payload")))
+        (ok (equalp (utf8 "p") (jj-file r (rev:revision-id rv) "p"))))
+      (let ((rv (rev:commit-revision s (rev:revision-delta s (getf k :c1)) :message "from empty")))
+        (ok (state= (rev:revision-state s (getf k :c1)) (rev:revision-state s rv))
+            "a root's diff applies to the empty tree")))))
+
+(deftest commit-identity-and-times
+  (with-test-repo (r)
+    (build-linear r)
+    (let* ((s (open-store r))
+           (rv (dt:with-fixed-clock ((instant (+ +t0+ 5000)))
+                 (rev:commit-revision s (diff:make-tree) :message "timed"
+                                      :valid-at (instant (+ +t0+ 42))
+                                      :provenance '(:author-name "Ada" :author-email "ada@example.invalid"
+                                                    :committer-name "Bob" :committer-email "bob@example.invalid")))))
+      (ok (= (+ +t0+ 5000) (unix (rev:revision-recorded-at rv))) "committer time = (dt:now)")
+      (ok (= (+ +t0+ 42) (unix (rev:revision-valid-at rv))) "author time = valid-at")
+      (ok (equal (list (format nil "~d ~d" (+ +t0+ 42) (+ +t0+ 5000)))
+                 (jj-log r (rev:revision-id rv)
+                         "author.timestamp().format(\"%s\") ++ \" \" ++ committer.timestamp().format(\"%s\")")))
+      (ok (equal (list "Ada ada@example.invalid Bob bob@example.invalid")
+                 (jj-log r (rev:revision-id rv)
+                         "author.name() ++ \" \" ++ author.email() ++ \" \" ++ committer.name() ++ \" \" ++ committer.email()")))
+      (let ((p (rev:revision-provenance rv)))
+        (ok (equal "Ada" (getf p :author-name)))
+        (ok (equal "bob@example.invalid" (getf p :committer-email)))
+        (ok (equal (commit-of r (rev:revision-id rv)) (getf p :commit-id))))
+      (let ((plain (dt:with-fixed-clock ((instant (+ +t0+ 6000)))
+                     (rev:commit-revision s (diff:make-tree) :message "plain"))))
+        (ok (= (+ +t0+ 6000) (unix (rev:revision-valid-at plain))) "author time defaults to now")
+        (ok (equal "Test User" (getf (rev:revision-provenance plain) :author-name))
+            "jj's configured identity")))))
+
+(deftest commit-messages
+  (with-test-repo (r)
+    (let ((s (open-store r)))
+      (ok (equal "" (rev:revision-message (rev:commit-revision s (diff:make-tree)))) "default \"\"")
+      (let ((rv (rev:commit-revision s (diff:make-tree) :message (lines "already" "" "ended"))))
+        (ok (equal (format nil "already~%~%ended") (rev:revision-message rv)))
+        (ok (equal (lines "already" "" "ended")
+                   (jj* r (list "log" "--no-graph" "-r" (rev:revision-id rv) "-T" "description")
+                        :ignore-working-copy t))
+            "no second newline")))))
+
+(deftest commit-refusals-are-atomic
+  (with-test-repo (r)
+    (let* ((k (build-linear r))
+           (s (open-store r))
+           (heads (sort (jj-log r "heads(all())" "commit_id") #'string<))
+           (refs (jj-lines r "bookmark" "list" "-T" "name ++ \"\\n\"")))
+      (flet ((unchanged (what)
+               (ok (equal heads (sort (jj-log r "heads(all())" "commit_id") #'string<))
+                   (format nil "~a: no new visible commit" what))
+               (ok (equal refs (jj-lines r "bookmark" "list" "-T" "name ++ \"\\n\""))
+                   (format nil "~a: refs unchanged" what))))
+        (ok (signals (rev:commit-revision s (diff:make-tree) :id "chosen") 'rev:revision-error))
+        (unchanged ":id")
+        (ok (signals (rev:commit-revision s 42) 'rev:revision-error))
+        (unchanged "bad content")
+        (ok (signals (rev:commit-revision s (diff:make-tree) :parents (list "no_such_rev"))
+                     'rev:revision-not-found))
+        (unchanged "missing parent")
+        (ok (signals (rev:commit-revision s (diff:make-tree) :ref "main" :expected (getf k :c1))
+                     'rev:ref-conflict))
+        (unchanged "stale expected")
+        (ok (signals (rev:commit-revision s (diff:make-tree) :ref "main" :expected nil)
+                     'rev:ref-conflict))
+        (unchanged "expected absent")
+        (ok (signals (rev:commit-revision s (diff:make-tree "g" (diff:make-tree-file
+                                                                 "0123456789012345678901234567890123456789"
+                                                                 :type :gitlink :mode #o160000)))
+                     'rev:revision-error))
+        (unchanged "gitlink")
+        (ok (null (jj-lines r "workspace" "list" "-T" "if(name != \"default\", name ++ \"\\n\")"))
+            "no temporary workspace left behind")))))
+
+(deftest commit-in-a-non-colocated-repo
+  (with-test-repo (r :colocate nil)
+    (let* ((s (open-store r))
+           (rv (with-untouched-workspace (r)
+                 (rev:commit-revision s (diff:make-tree "a" (diff:make-tree-file (lines "a")))
+                                      :ref "main" :message "first"))))
+      (ok (equal (list (rev:revision-id rv)) (bookmark-target r "main")))
+      (ok (equalp (utf8 (lines "a")) (jj-file r "main" "a"))))))
