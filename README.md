@@ -4,7 +4,7 @@
 
 Capability brief: [`cl-stack/docs/capabilities/revision-backend-jj.md`](https://github.com/egao1980/cl-stack/blob/main/docs/capabilities/revision-backend-jj.md) · plan: [HARNESS-PLAN.md](https://github.com/egao1980/cl-workspace/blob/main/docs/HARNESS-PLAN.md) Track V · sibling: [revision-backend-git](https://github.com/egao1980/revision-backend-git).
 
-**Status: milestone V2 contract.** Exports, conditions, classes, templates and documented behaviour are in place; the methods are stubs that signal a plain `simple-error`. `tests/` is the specification (Rove, run against throwaway repositories built with the real jj). Implementation runs through **team-solve**.
+Version **0.1.0** — milestone V2: a [revision-protocol](https://github.com/egao1980/revision-protocol) store, working copy and read-only revision filesystem over the **jj (Jujutsu) CLI** (minimum jj 0.47.1; no jj-lib). Revision ids are change ids (commit ids for divergent changes); refs are bookmarks and tags with CAS emulated through operation ids; conflicted revisions are first-class. Requires process-protocol 0.3.0 / process-backend-uiop 0.2.0.
 
 ## V2 surface (= revision-backend-git V0)
 
