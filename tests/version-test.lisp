@@ -213,7 +213,20 @@
                              :transactional-apply nil :projection nil
                              :conflicted-revisions t)
                            caps))
-      (ok (member :ref-cas caps) ":ref-cas is present (and NIL)"))))
+      (ok (member :ref-cas caps) ":ref-cas is present (and NIL)")))
+  (testing "revision-protocol's capability queries agree"
+    (with-test-repo (r)
+      (let ((s (open-store r)))
+        (ok (eq nil (rev:ref-cas-p s)) ":ref-cas NIL: CAS is emulated over the operation log")
+        (ok (eq t (rev:conflicted-revisions-p s)) ":conflicted-revisions T")))))
+
+(deftest vc-tool-version-error-is-the-protocol-condition
+  ;; revision-protocol#4: one condition for the git and jj backends, re-exported here.
+  (ok (eq 'jj:vc-tool-version-error 'rev:vc-tool-version-error))
+  (ok (eq 'jj:vc-tool-version-error-tool 'rev:vc-tool-version-error-tool))
+  (ok (eq 'jj:vc-tool-version-error-found 'rev:vc-tool-version-error-found))
+  (ok (eq 'jj:vc-tool-version-error-required 'rev:vc-tool-version-error-required))
+  (ok (eq :external (nth-value 1 (find-symbol "VC-TOOL-VERSION-ERROR" "REVISION-BACKEND-JJ")))))
 
 (deftest operations
   (with-test-repo (r)

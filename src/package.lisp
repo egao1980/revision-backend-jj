@@ -7,10 +7,15 @@
                     (#:proc #:process-protocol)
                     (#:pathlib #:cl-stack-pathlib)
                     (#:json #:json-protocol))
+  ;; revision-protocol's condition (shared with revision-backend-git), re-exported.
+  (:import-from #:revision-protocol
+                #:vc-tool-version-error
+                #:vc-tool-version-error-tool
+                #:vc-tool-version-error-found
+                #:vc-tool-version-error-required)
   (:export
-   ;; conditions (jj-specific; everything else is a revision-protocol condition).
-   ;; VC-TOOL-VERSION-ERROR becomes revision-protocol's symbol, re-exported
-   ;; here, once revision-protocol#4 lands.
+   ;; conditions: VC-TOOL-VERSION-ERROR is revision-protocol's (re-exported);
+   ;; JJ-COMMAND-ERROR is jj-specific; everything else is a protocol condition.
    #:vc-tool-version-error
    #:vc-tool-version-error-tool
    #:vc-tool-version-error-found

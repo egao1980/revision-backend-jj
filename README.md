@@ -4,7 +4,7 @@
 
 Capability brief: [`cl-stack/docs/capabilities/revision-backend-jj.md`](https://github.com/egao1980/cl-stack/blob/main/docs/capabilities/revision-backend-jj.md) · plan: [HARNESS-PLAN.md](https://github.com/egao1980/cl-workspace/blob/main/docs/HARNESS-PLAN.md) Track V · sibling: [revision-backend-git](https://github.com/egao1980/revision-backend-git).
 
-Version **0.1.0** — milestone V2: a [revision-protocol](https://github.com/egao1980/revision-protocol) store, working copy and read-only revision filesystem over the **jj (Jujutsu) CLI** (minimum jj 0.47.1; no jj-lib). Revision ids are change ids (commit ids for divergent changes); refs are bookmarks and tags with CAS emulated through operation ids; conflicted revisions are first-class. Requires process-protocol 0.3.0 / process-backend-uiop 0.2.0.
+Version **0.2.0** — milestone V2 on revision-protocol 0.3.0 / diff-protocol 0.2.1 (`capture-revision` takes `:valid-at` / `:provenance`; `ref-cas-p` NIL, `conflicted-revisions-p` T). V2: a [revision-protocol](https://github.com/egao1980/revision-protocol) store, working copy and read-only revision filesystem over the **jj (Jujutsu) CLI** (minimum jj 0.47.1; no jj-lib). Revision ids are change ids (commit ids for divergent changes); refs are bookmarks and tags with CAS emulated through operation ids; conflicted revisions are first-class. Requires process-protocol 0.3.0 / process-backend-uiop 0.2.0.
 
 ## V2 surface (= revision-backend-git V0)
 
@@ -13,7 +13,7 @@ Version **0.1.0** — milestone V2: a [revision-protocol](https://github.com/ega
 - **`jj-working-copy`** (a `revision-target`): @ is a commit; stamp = @'s parents; drift = @'s own changes after a snapshot; `capture-revision` = `jj commit` (files never touched).
 - **`revision-filesystem`**: read-only [cl-stack-pathlib](https://github.com/egao1980/cl-stack-pathlib) filesystem over one commit.
 - **`run-jj`**, `current-operation`, `list-operations`, `jj-capabilities`; the `-T` templates the backend runs (`*commit-template*` …) and their parsers.
-- **Conditions:** the protocol's own plus `vc-tool-version-error` (tool / found / required; moves to revision-protocol, [#4](https://github.com/egao1980/revision-protocol/issues/4)) and `jj-command-error` (command / exit-code / stderr).
+- **Conditions:** the protocol's own plus `vc-tool-version-error` (tool / found / required; revision-protocol's symbol, re-exported, [revision-protocol#4](https://github.com/egao1980/revision-protocol/issues/4)) and `jj-command-error` (command / exit-code / stderr).
 
 Reads run with `--ignore-working-copy`; every command gets `--no-pager --color=never --quiet` and fixed `--config` layers (conflict markers, diff format, no EOL conversion).
 

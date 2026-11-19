@@ -322,6 +322,16 @@ may record unresolved conflicts (REVISION-CONFLICTS)."
         :ref-cas nil :atomic-multi-ref nil :gc nil :signed nil
         :transactional-apply nil :projection nil :conflicted-revisions t))
 
+;;; revision-protocol's capability queries (revision-protocol#5).
+
+(defmethod rev:ref-cas-p ((store jj-store))
+  "NIL: CAS is emulated over the operation log (see JJ-CAPABILITIES)."
+  nil)
+
+(defmethod rev:conflicted-revisions-p ((store jj-store))
+  "T: a revision may record unresolved conflicts (REVISION-CONFLICTS)."
+  t)
+
 ;;; ------------------------------------------------------------------
 ;;; The operation log — jj's recorded-time axis.
 ;;; ------------------------------------------------------------------

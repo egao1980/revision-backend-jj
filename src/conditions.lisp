@@ -3,32 +3,18 @@
 ;;; Conditions. Everything a revision store reports through the protocol
 ;;; (REVISION-NOT-FOUND, AMBIGUOUS-REVISION, REF-CONFLICT, TAG-IMMUTABLE,
 ;;; REVISION-ERROR ...) is REVISION-PROTOCOL's own type: the backend signals
-;;; those. Only two conditions are jj-specific:
+;;; those.
 ;;;
 ;;;   revision-error
-;;;   ├── vc-tool-version-error (tool found required)
+;;;   ├── vc-tool-version-error (tool found required)   revision-protocol's,
+;;;   │                                                  re-exported here
 ;;;   └── jj-command-error      (command exit-code stderr)
 ;;;
-;;; VC-TOOL-VERSION-ERROR has the same name, slots and readers as
-;;; revision-backend-git's. revision-protocol#4 moves it into the protocol;
-;;; this package then imports and re-exports the protocol's symbol (callers
-;;; that write STACK-REV-JJ:VC-TOOL-VERSION-ERROR keep working).
-
-(define-condition vc-tool-version-error (rev:revision-error)
-  ((tool :initarg :tool :reader vc-tool-version-error-tool :initform nil)
-   (found :initarg :found :reader vc-tool-version-error-found :initform nil)
-   (required :initarg :required :reader vc-tool-version-error-required
-             :initform nil))
-  (:report (lambda (c s)
-             (format s "~a ~a is too old or missing: found ~a, need ~a or later"
-                     (or (vc-tool-version-error-tool c) "tool")
-                     (if (vc-tool-version-error-found c) "version" "program")
-                     (or (vc-tool-version-error-found c) "nothing")
-                     (vc-tool-version-error-required c))))
-  (:documentation "The version-control program TOOL (a string, \"jj\") is
-older than REQUIRED (a version string), or cannot be run at all. FOUND is the
-numeric version string the program reported (\"0.46.0\"), or NIL when it could
-not be started. Signalled by MAKE-JJ-STORE, before any other jj command runs."))
+;;; VC-TOOL-VERSION-ERROR (TOOL "jj", FOUND the numeric version jj reported
+;;; such as "0.46.0" or NIL when it could not be started) is signalled by
+;;; MAKE-JJ-STORE before any other jj command runs. It is the same condition
+;;; revision-backend-git signals (revision-protocol#4); callers that write
+;;; STACK-REV-JJ:VC-TOOL-VERSION-ERROR keep working.
 
 (define-condition jj-command-error (rev:revision-error)
   ((command :initarg :command :reader jj-command-error-command :initform nil)
