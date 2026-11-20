@@ -105,7 +105,9 @@
 ;;;   idempotent (the existing tag, nothing written); other target →
 ;;;   TAG-IMMUTABLE (restart CREATE-NEW-TAG); a bookmark NAME exists →
 ;;;   REF-CONFLICT (expected NIL, actual its target); :ANNOTATION non-NIL →
-;;;   REVISION-ERROR, nothing created.
+;;;   REVISION-ERROR, nothing created. TAG-REWRITE-P is NIL: with no
+;;;   annotations there is nothing to rewrite, so REPLACE-ANNOTATION is never
+;;;   offered (revision-protocol 0.4.0).
 ;;;
 ;;; Listener — (SETF REF-LISTENER); events (:REF-MOVED name old new) with
 ;;;   revision ids, for changes made through this store only.
@@ -559,7 +561,8 @@ leaves out."
           #'string< :key #'car)))
 
 (defmethod rev:ref-listener ((store jj-store))
-  (%jj-store-listener store))
+  (bt2:with-recursive-lock-held ((%jj-store-lock store))
+    (%jj-store-listener store)))
 
 (defmethod (setf rev:ref-listener) (function (store jj-store))
   (check-type function (or null function))
@@ -567,7 +570,7 @@ leaves out."
     (setf (%jj-store-listener store) function)))
 
 (defun %notify (store event)
-  (let ((listener (%jj-store-listener store)))
+  (let ((listener (and event (rev:ref-listener store))))
     (when (and event listener)
       (funcall listener event))))
 
@@ -1413,6 +1416,9 @@ every exit."
   (check-type valid-at (or null dt:instant))
   (when id
     (error 'rev:revision-error :message "jj chooses revision ids; :ID is not accepted"))
+  (when (and expected-p (null ref))
+    (error 'rev:revision-error
+           :message (format nil "commit-revision :expected ~s given without :ref" expected)))
   (unless (or (diff:tree-dir-p content) (stringp content) (typep content 'diff:diff)
               (typep content 'rev:revision-payload))
     (error 'rev:revision-error
