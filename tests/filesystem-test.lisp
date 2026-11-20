@@ -135,3 +135,37 @@
       (let ((root (jj:revision-path s (rev:rev-ref "main"))))
         (ok (pathlib:directory-p root))
         (ok (equal (lines "inner") (pathlib:read-text (pathlib:join root "thing/inner.txt"))))))))
+
+(deftest glob-through-pathlib
+  ;; FS-GLOB is cl-stack-pathlib's generic method over FS-ITERDIR.
+  (with-test-repo (r)
+    (let* ((k (build-content r))
+           (s (open-store r))
+           (all (jj-paths r (getf k :k2))))
+      (flet ((posix (ps) (mapcar #'pathlib:as-posix ps))
+             (abs* (ps) (mapcar (lambda (p) (concatenate 'string "/" p)) ps))
+             (txt-p (p) (uiop:string-suffix-p p ".txt")))
+        (with-revision-fs (fs s (getf k :k2))
+          (ok (set= (abs* (remove-if-not (lambda (p) (and (txt-p p) (not (find #\/ p)))) all))
+                    (posix (pathlib:glob "/" "*.txt")))
+              "glob: top level only")
+          (ok (set= (abs* (remove-if-not #'txt-p all))
+                    (posix (pathlib:rglob "/" "*.txt")))
+              "rglob: every depth")
+          (ok (equal '("/src/main.lisp") (posix (pathlib:glob "/" "src/*.lisp")))
+              "pattern with a slash")
+          (ok (equal '("/src/main.lisp") (posix (pathlib:glob "/src" "*")))
+              "glob under a subdirectory")
+          (ok (equal '("/src/main.lisp") (posix (pathlib:glob "/" "**/m?in.[l]isp")))
+              "** and fnmatch classes")
+          (ok (null (pathlib:glob "/" "*.nothing")))
+          (ok (not (member "/new/name.txt"
+                           (posix (pathlib:rglob "/" "*.txt"
+                                                 :ignore (pathlib:parse-ignore '("new/"))))
+                           :test #'string=))
+              "IGNORE drops ignored directories")
+          (ok (not (member "/new/name.txt"
+                           (loop for (dir files) in (pathlib:walk "/" :ignore (pathlib:parse-ignore '("new/")))
+                                 nconc (posix files))
+                           :test #'string=))
+              "walk IGNORE"))))))

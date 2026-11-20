@@ -29,13 +29,16 @@
 ;;;   fs-read-bytes                              exact content; a conflicted
 ;;;                                              file reads as its materialized
 ;;;                                              conflict (REVISION-STATE)
-;;;   fs-walk / fs-glob                          as zip-filesystem (IGNORE too)
+;;;   fs-walk                                    as zip-filesystem (IGNORE too)
+;;;   fs-glob                                    pathlib's generic method over
+;;;                                              fs-iterdir (fnmatch, IGNORE)
 ;;;   fs-stat                                    kind :FILE / :DIRECTORY
 ;;;                                              (:SYMLINK without following),
 ;;;                                              mode #o644 / #o755, mtime as
 ;;;                                              fs-last-modified
 ;;;   fs-parse / fs-join / fs-parent / fs-name / fs-absolute / fs-resolve /
-;;;   fs-normpath / fs-expanduser / fs-same-p    POSIX, like zip-filesystem
+;;;   fs-normpath / fs-expanduser / fs-same-p    POSIX: the pure path GFs of a
+;;;                                              private memory-filesystem
 ;;;   every mutating GF, fs-make-temp, fs-as-uri → PATHLIB:UNSUPPORTED-OPERATION
 ;;;   a missing path                             → PATHLIB:PATH-NOT-FOUND
 ;;;   (read-bytes, file-size, iterdir, stat; with pathlib's restarts where
@@ -51,7 +54,10 @@
    ;; "/a/b" → (path . node) of a file, or :DIR; built on first use.
    (index :initform nil :accessor %fs-index)
    (index-lock :initform (bt2:make-lock :name "revision-filesystem")
-               :reader %fs-index-lock))
+               :reader %fs-index-lock)
+   (paths :initform (pathlib:make-memory-filesystem :cwd "/" :home "/")
+          :reader %fs-paths
+          :documentation "Private POSIX filesystem whose pure path GFs this one uses."))
   (:default-initargs :name "jj-revision")
   (:documentation "Read-only CL-STACK-PATHLIB filesystem over one jj commit's
 tree. REVISION-FILESYSTEM-REVISION is the REVISION (its REVISION-CONTENT the
@@ -99,12 +105,18 @@ REVISION-FILESYSTEM of DESIGNATOR in STORE."
               (%ensure-parents table key)))
           (setf (%fs-index fs) table)))))
 
+(defun %posix-of (pathname)
+  "Absolute POSIX string of the absolute, normalized PATHNAME (no trailing /)."
+  (let* ((dir (pathname-directory pathname))
+         (comps (and (consp dir) (remove-if-not #'stringp (rest dir))))
+         (name (pathname-name pathname))
+         (type (pathname-type pathname))
+         (file (cond ((and name (stringp type)) (format nil "~a.~a" name type))
+                     ((and name (plusp (length name))) name))))
+    (format nil "/~{~a~^/~}" (append comps (and file (list file))))))
+
 (defun %fs-key (fs pathname)
-  (let* ((pn (pathlib:fs-absolute fs pathname))
-         (s (pathlib::%pathname-as-posix pn))
-         (s (if (and (plusp (length s)) (char= (char s 0) #\/)) s (concatenate 'string "/" s)))
-         (s (string-right-trim "/" s)))
-    (if (zerop (length s)) "/" s)))
+  (%posix-of (pathlib:fs-normpath fs (pathlib:fs-absolute fs pathname))))
 
 (defun %fs-entry (fs pathname)
   "→ (values entry found-p): (path . node) of a file, or :DIR."
@@ -116,14 +128,23 @@ REVISION-FILESYSTEM of DESIGNATOR in STORE."
     (and (consp e) e)))
 
 (defun %fs-missing (fs pathname)
-  (pathlib::%restart-path-not-found fs (pathlib:fs-absolute fs pathname)
-                                    :message "no such file in the revision"
-                                    :allow-create-file nil
-                                    :allow-create-directory nil
-                                    :allow-ignore nil))
+  "Signal PATHLIB:PATH-NOT-FOUND with a USE-VALUE restart (a revision cannot
+create the file or directory)."
+  (restart-case (error 'pathlib:path-not-found
+                       :filesystem fs :path (pathlib:fs-absolute fs pathname)
+                       :message "no such file in the revision")
+    (use-value (value)
+      :report "Use a supplied value instead"
+      :interactive (lambda ()
+                     (format *query-io* "Value to use: ")
+                     (force-output *query-io*)
+                     (list (read *query-io*)))
+      value)))
 
 (defun %fs-read-only (fs op pathname)
-  (pathlib::%unsupported fs op pathname))
+  (error 'pathlib:unsupported-operation
+         :filesystem fs :path pathname
+         :message (format nil "~A does not support ~A" fs op)))
 
 (defun %file-octets (node)
   (let ((content (diff:tree-file-content node)))
@@ -131,29 +152,25 @@ REVISION-FILESYSTEM of DESIGNATOR in STORE."
         (%octets content)
         (copy-seq content))))
 
-;;; POSIX path algebra, as zip-filesystem.
+;;; POSIX path algebra: the pure path GFs of a private memory filesystem,
+;;; which has the same POSIX semantics.
 
 (defmethod pathlib:fs-parse ((fs revision-filesystem) designator &key directory)
-  (let ((pn (etypecase designator
-              (pathname designator)
-              (string (pathlib::%parse-posix designator))
-              (pathlib:path (pathlib:path-pathname designator)))))
-    (if directory (uiop:ensure-directory-pathname pn) pn)))
+  (pathlib:fs-parse (%fs-paths fs)
+                    (if (pathlib:path-p designator) (pathlib:path-pathname designator) designator)
+                    :directory directory))
 
 (defmethod pathlib:fs-join ((fs revision-filesystem) base relative)
-  (uiop:merge-pathnames* (pathlib:fs-parse fs relative)
-                         (uiop:ensure-directory-pathname (pathlib:fs-parse fs base))))
+  (pathlib:fs-join (%fs-paths fs) base relative))
 
 (defmethod pathlib:fs-parent ((fs revision-filesystem) pathname)
-  (pathlib::%logical-parent (pathlib:fs-parse fs pathname)))
+  (pathlib:fs-parent (%fs-paths fs) pathname))
 
 (defmethod pathlib:fs-name ((fs revision-filesystem) pathname)
-  (pathlib::%file-namestring* (pathlib:fs-parse fs pathname)))
+  (pathlib:fs-name (%fs-paths fs) pathname))
 
 (defmethod pathlib:fs-absolute ((fs revision-filesystem) pathname &key (defaults "/"))
-  (let ((pn (pathlib:fs-parse fs pathname))
-        (base (pathlib:fs-parse fs defaults :directory t)))
-    (if (uiop:absolute-pathname-p pn) pn (uiop:merge-pathnames* pn base))))
+  (pathlib:fs-absolute (%fs-paths fs) pathname :defaults defaults))
 
 (defmethod pathlib:fs-resolve ((fs revision-filesystem) pathname &key (strict t))
   (let ((abs (pathlib:fs-normpath fs (pathlib:fs-absolute fs pathname))))
@@ -162,14 +179,7 @@ REVISION-FILESYSTEM of DESIGNATOR in STORE."
         (%fs-missing fs abs))))
 
 (defmethod pathlib:fs-normpath ((fs revision-filesystem) pathname)
-  (let ((pn (pathlib:fs-parse fs pathname)))
-    (multiple-value-bind (abs? stack dir?) (pathlib::%collapse-dot-segments pn)
-      (pathlib:fs-parse fs
-                        (cond ((and abs? (null stack)) "/")
-                              (abs? (format nil "/~{~A~^/~}" stack))
-                              ((null stack) ".")
-                              (t (format nil "~{~A~^/~}" stack)))
-                        :directory dir?))))
+  (pathlib:fs-normpath (%fs-paths fs) pathname))
 
 (defmethod pathlib:fs-expanduser ((fs revision-filesystem) pathname)
   (pathlib:fs-parse fs pathname))
@@ -233,32 +243,27 @@ REVISION-FILESYSTEM of DESIGNATOR in STORE."
              (%index fs))
     (mapcar (lambda (k) (pathlib:fs-parse fs k)) (sort out #'string<))))
 
-(defmethod pathlib:fs-glob ((fs revision-filesystem) pathname pattern &key recursive ignore)
-  (let* ((base-key (%fs-key fs pathname))
-         (prefix (if (string= base-key "/") "/" (concatenate 'string base-key "/")))
-         (matcher (pathlib::%resolve-ignore fs pathname ignore))
-         (out '()))
-    (maphash
-     (lambda (k v)
-       (when (and (uiop:string-prefix-p prefix k) (not (string= k base-key)))
-         (let* ((rel (subseq k (length prefix)))
-                (nm (file-namestring k))
-                (nested-p (find #\/ rel)))
-           (when (and (plusp (length rel))
-                      (not (and matcher (pathlib:ignore-path-p matcher rel :directory (eq v :dir))))
-                      (or recursive (find #\/ pattern) (not nested-p))
-                      (if (find #\/ pattern)
-                          (pathname-match-p rel (pathlib::%wild-pattern pattern))
-                          (and nm (pathlib::%name-matches-p nm pattern))))
-             (push k out)))))
-     (%index fs))
-    (mapcar (lambda (k) (pathlib:fs-parse fs k)) (sort out #'string<))))
+;;; FS-GLOB is pathlib's generic method (over FS-ITERDIR).
+
+(defun %fs-ignore (fs base ignore)
+  "Matcher for IGNORE (NIL, an IGNORE-MATCHER or :AUTO) at BASE."
+  (etypecase ignore
+    (null nil)
+    (pathlib:ignore-matcher ignore)
+    ((eql :auto) (pathlib:merge-ignore (pathlib:load-ignore-files fs base)
+                                       (pathlib:parse-ignore '(".git/" ".jj/"))))))
 
 (defmethod pathlib:fs-walk ((fs revision-filesystem) pathname &key (top-down t) follow-symlinks ignore)
   (declare (ignore follow-symlinks))
   (let* ((out '())
          (root (pathlib:fs-absolute fs pathname))
-         (ignored-p (pathlib::%ignore-predicate fs root ignore)))
+         (matcher (%fs-ignore fs root ignore))
+         (prefix (let ((k (%fs-key fs root)))
+                   (if (string= k "/") "/" (concatenate 'string k "/"))))
+         (ignored-p (and matcher
+                         (lambda (p dir-p)
+                           (pathlib:ignore-path-p matcher (subseq (%fs-key fs p) (length prefix))
+                                                  :directory dir-p)))))
     (labels ((walk* (dir)
                (let* ((entries (pathlib:fs-iterdir fs dir))
                       (files (remove-if-not (lambda (p) (pathlib:fs-file-p fs p)) entries))
@@ -276,7 +281,7 @@ REVISION-FILESYSTEM of DESIGNATOR in STORE."
   (let ((e (%fs-file fs pathname)))
     (cond ((null e) (%fs-missing fs pathname))
           ((eql #o120000 (diff:tree-file-mode (cdr e)))
-           (pathlib::%parse-posix (diff:tree-file-content (cdr e))))
+           (pathlib:fs-parse fs (diff:tree-file-content (cdr e))))
           (t (error 'pathlib:path-error :filesystem fs :path pathname
                                         :message "not a symlink")))))
 
