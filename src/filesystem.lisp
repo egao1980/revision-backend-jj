@@ -349,9 +349,13 @@ create the file or directory)."
   (declare (ignore bytes append if-exists if-does-not-exist))
   (%fs-read-only fs 'pathlib:fs-write-bytes pathname))
 
-(defmethod pathlib:fs-write-atomic ((fs revision-filesystem) pathname bytes &key expected-hash)
-  (declare (ignore bytes expected-hash))
+(defmethod pathlib:fs-write-atomic ((fs revision-filesystem) pathname bytes &key expected-hash mode)
+  (declare (ignore bytes expected-hash mode))
   (%fs-read-only fs 'pathlib:fs-write-atomic pathname))
+
+(defmethod pathlib:fs-chmod ((fs revision-filesystem) pathname mode)
+  (declare (ignore mode))
+  (%fs-read-only fs 'pathlib:fs-chmod pathname))
 
 (defmethod pathlib:fs-make-temp ((fs revision-filesystem) &key directory prefix suffix)
   (declare (ignore directory prefix suffix))
