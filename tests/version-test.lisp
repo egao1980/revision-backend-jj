@@ -211,7 +211,7 @@
       (ok (plist-matches-p '(:primary :state :merges t :children-index t :valid-time t
                              :ref-cas nil :atomic-multi-ref nil :gc nil :signed nil
                              :transactional-apply nil :projection nil
-                             :conflicted-revisions t)
+                             :conflicted-revisions t :tag-rewrite nil)
                            caps))
       (ok (member :ref-cas caps) ":ref-cas is present (and NIL)")))
   (testing "revision-protocol's capability queries agree"

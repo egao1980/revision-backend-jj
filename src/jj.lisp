@@ -312,15 +312,17 @@ capability names; revision-protocol has query GFs for only some of them):
   :PRIMARY :STATE          :MERGES T             :CHILDREN-INDEX T
   :VALID-TIME T            :REF-CAS NIL          :ATOMIC-MULTI-REF NIL
   :GC NIL                  :SIGNED NIL           :TRANSACTIONAL-APPLY NIL
-  :PROJECTION NIL          :CONFLICTED-REVISIONS T
+  :PROJECTION NIL          :CONFLICTED-REVISIONS T   :TAG-REWRITE NIL
 
 :REF-CAS NIL: CAS is emulated (serialized in the image, divergence detected
 across processes), not guaranteed by jj. :CONFLICTED-REVISIONS T: a revision
-may record unresolved conflicts (REVISION-CONFLICTS)."
+may record unresolved conflicts (REVISION-CONFLICTS). :TAG-REWRITE NIL: jj
+tags carry no annotation, so there is nothing to rewrite (TAG-REWRITE-P)."
   (declare (ignore store))
   (list :primary :state :merges t :children-index t :valid-time t
         :ref-cas nil :atomic-multi-ref nil :gc nil :signed nil
-        :transactional-apply nil :projection nil :conflicted-revisions t))
+        :transactional-apply nil :projection nil :conflicted-revisions t
+        :tag-rewrite nil))
 
 ;;; revision-protocol's capability queries (revision-protocol#5).
 
@@ -331,6 +333,12 @@ may record unresolved conflicts (REVISION-CONFLICTS)."
 (defmethod rev:conflicted-revisions-p ((store jj-store))
   "T: a revision may record unresolved conflicts (REVISION-CONFLICTS)."
   t)
+
+(defmethod rev:tag-rewrite-p ((store jj-store))
+  "NIL: jj tags carry no annotation (TAG-REVISION refuses :ANNOTATION), so
+TAG-REVISION never offers REPLACE-ANNOTATION. `jj tag set --allow-move` moves a
+tag, which the protocol forbids."
+  nil)
 
 ;;; ------------------------------------------------------------------
 ;;; The operation log — jj's recorded-time axis.
